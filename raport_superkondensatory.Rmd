@@ -1,0 +1,357 @@
+---
+title: "Raport analizy danych — Etap 1 (szablon)"
+author: "Marta Jóźwiak"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M:%S %Z')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: united
+    df_print: paged
+    css: style.css
+---
+
+
+# Executive summary
+
+> - Analiza danych materiałów do superkondensatorów rozpoczęła się od wczytania i oczyszczenia danych, w tym uzupełnienia brakujących wartości – dane numeryczne zastąpiono medianą, a tekstowe wartości „NA”. Wstępne podsumowanie wykazało dużą różnorodność zmiennych numerycznych oraz kategorycznych.
+> - Szczegółowa analiza rozkładów zmiennych numerycznych pokazała, że większość atrybutów jest silnie skośna, a w niektórych kolumnach pojawiają się obserwacje odstające, które mogą odpowiadać zarówno błędom pomiarowym, jak i wartościom o szczególnym znaczeniu naukowym.
+> - Analiza korelacji zmiennych wykazała m.in., że c_at_percent i o_at_percent są silnie ujemnie skorelowane (-0.84), co wskazuje na odwrotną zależność między zawartością węgla i tlenu - więcej tlenu może zwiększać pojemność pseudopojemnościową, ale zmniejszać przewodność.
+> - Interaktywne wykresy pozwoliły podsumować trendy: bardzo mała powierzchnia właściwa elektrody powoduje dużą rozpiętość pojemności, natomiast większa powierzchnia (>4 m²/g) utrzymuje pojemność na niskim poziomie. Z kolei większe okno potencjału wiąże się ze spadkiem maksymalnej pojemności. To może sugerować, że nadmierna powierzchnia elektrody nie sprzyja zwiększeniu pojemności – możliwe przyczyny: słaba przewodność materiału, zbyt duże pory, ograniczenia elektrolitu.
+> - Model Random Forest przewidujący pojemność na podstawie pozostałych zmiennych numerycznych, analizowany za pomocą DALEX, wykazał, że najważniejszą cechą determinującą pojemność jest potential_window_v, co podkreśla kluczową rolę szerokości okna potencjału elektrody przy projektowaniu materiałów do superkondensatorów.
+> - Wiodący wniosek: spośród wszystkich badanych parametrów to okno potencjału elektrody (potential_window_v) jest najistotniejszym czynnikiem wpływającym na pojemność, co ma kluczowe znaczenie dla optymalizacji projektów superkondensatorów.
+
+
+
+
+# Wykorzystane biblioteki
+
+> Wykorzystane biblioteki:
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)   
+library(knitr)       
+library(kableExtra) 
+library(readr)       
+library(janitor)   
+library(lubridate)   
+library(ggplot2)      
+library(plotly)      
+library(corrplot)     
+library(ggthemes)     
+library(DALEX)       
+library(randomForest)
+library(reshape2)
+
+
+```
+# Powtarzalność wyników
+
+```{r session}
+
+knitr::opts_chunk$set(
+  echo = TRUE,      
+  message = FALSE,  
+  warning = FALSE,  
+  cache = FALSE     
+)
+set.seed(12345) 
+```
+
+
+# Wczytanie danych
+
+
+```{r read-data}
+plik <- "C:/Users/jozwi/Documents/raport_superkondensatory/data/data.csv"
+df <- read_csv(plik, guess_max = 10000) %>% clean_names()
+
+glimpse(df)
+```
+
+# Przetwarzanie brakujących danych
+
+```{r missing-data}
+
+missing_summary <- df %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "column", values_to = "missing_count") %>%
+  arrange(desc(missing_count))
+
+knitr::kable(missing_summary, caption = "Braki danych w kolumnach") %>%
+  kableExtra::kable_styling(full_width = F)
+
+
+df_clean <- df %>%
+  mutate(
+    across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)),
+    across(where(is.character), ~ ifelse(is.na(.), "NA", .))
+  )
+
+cat("Łączna liczba NA po przetworzeniu:", sum(is.na(df_clean)), "\n")
+```
+W przypadki jeśli kolumna ma charakter numeryczny to pusta komórka jest wypełniena medianą, jeśli charakter tekstowy to jesy wypełniana "NA". Końcowy komunikat ukazuje pozbycie się pustych danych.
+
+# Podsumowanie rozmiaru zbioru i podstawowe statystyki
+## Kolumny numeryczne
+
+```{r summary-stats-final}
+numeric_cols <- df_clean %>% select(where(is.numeric))
+
+num_summary <- data.frame(
+  Column = character(),
+  Min = numeric(),
+  Median = numeric(),
+  Mean = numeric(),
+  Max = numeric(),
+  SD = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for(col in names(numeric_cols)){
+  num_summary <- rbind(num_summary, data.frame(
+    Column = col,
+    Min = min(numeric_cols[[col]], na.rm = TRUE),
+    Median = median(numeric_cols[[col]], na.rm = TRUE),
+    Mean = round(mean(numeric_cols[[col]], na.rm = TRUE), 2),
+    Max = max(numeric_cols[[col]], na.rm = TRUE),
+    SD = round(sd(numeric_cols[[col]], na.rm = TRUE), 2),
+    stringsAsFactors = FALSE
+  ))
+}
+
+knitr::kable(num_summary, caption = "Podstawowe statystyki kolumn numerycznych") %>%
+  kableExtra::kable_styling(full_width = F)
+```
+## Kolumny kategoryczne
+```{r summary-stats-categorical}   
+categorical_cols <- df_clean %>% select(where(is.character))
+
+
+unique_counts <- sapply(categorical_cols, function(col) length(unique(col)))
+
+categorical_summary <- data.frame(
+  Column = names(unique_counts),
+  Unique_Values = as.integer(unique_counts),
+  stringsAsFactors = FALSE
+)
+
+knitr::kable(categorical_summary, caption = "Liczba unikalnych wartości w kolumnach kategorycznych") %>%
+  kableExtra::kable_styling(full_width = F)
+  
+
+```
+## Obserwacje
+
+> - Kolumny numeryczne są bardzo różnorodne, rozpiętość np. kolumny `capacitance_f_g` ma wartości od 1.4 do 3344.08.
+> - Kolumna `cell_configuration_three_two_electrode_system` ma tylko 3 unikalne wartości – idealne do analizy porównawczej.
+> - Kolumna `electrode_configuration` ma 353 unikalne wartości – bardzo różnorodne, może wymagać grupowania do wizualizacji.
+
+
+# Analiza atrybutów
+## Histogramy oraz wykresy pudełkowe dla atrybutów numerycznych
+```{r numeric-distributions, fig.height=4, fig.width=6, warning=FALSE, message=FALSE}
+
+numeric_cols <- df_clean %>% select(where(is.numeric))
+
+for(col in names(numeric_cols)){
+  
+  # Histogram
+  p_hist <- ggplot(df_clean, aes_string(x = col)) +
+    geom_histogram(bins = 30, fill = "#2c7fb8", color = "white") +
+    theme_minimal() +
+    labs(title = paste("Histogram rozkładu:", col),
+         x = col,
+         y = "Liczba próbek")
+  
+  print(p_hist)
+  
+  # Boxplot
+  p_box <- ggplot(df_clean, aes_string(y = col)) +
+    geom_boxplot(fill = "#fdae61", color = "black") +
+    theme_minimal() +
+    labs(title = paste("Wykres pudełkowy:", col),
+         y = col,
+         x = "")
+  
+  print(p_box)
+}
+
+ggplot(df_clean, aes(x = cell_configuration_three_two_electrode_system,
+y = capacitance_f_g,
+fill = cell_configuration_three_two_electrode_system)) +
+geom_boxplot() +
+theme_minimal() +
+labs(title = "Porównanie pojemności w zależności od konfiguracji ogniwa",
+x = "Konfiguracja ogniwa (3/2 elektrody)",
+y = "Pojemność (F/g)") +
+scale_fill_brewer(palette = "Set2") +
+theme(legend.position = "none")
+
+  
+```
+
+## Obserwacje analizy atrybutu
+
+> - W kolumnach upper_limit_of_potential_window_v i pootencial window_v rozkład wartości jest silnie nieregularny.
+> - W kolumnach current_density_a_g, capacitance_f_g można zauważyć duży spadek ilości próbek wraz ze wzrostem wartości mierzonej.
+> - W reszcie kolumn występuje rozkład silnie skośny, większość obserwacji skupia się wokół jednej (max dwóch) wartości.
+> - Z wielkości zółtych pól na wykresach pudełkowych można łatwo odczytać zróżnicowanie atrybutów. Na przykład zmienność atrybutu electrolyte_concentration_m jest bardzo duża, w porównaniu z electrolyte_concentration_m.
+> - Z wykresów pudełkowych można także odczytać, które z atrybutów mają stosunkowo dużo wartości odstających. Jest to istotny aspekt badania superkondensatorów, ponieważ mogą świadczyć np. o najlepszych parametrach lub uszkodzeniach
+> - Z Wykresu "Porównanie pojemności w zależności od konfiguracji ogniwa" możemy wywnioskować, że układ 3 elektrodowy ma najwięcej wartości odstjących
+
+# Korelacje między zmiennymi
+## Macierz korelacji
+```{r correlation-analysis, fig.height=6, fig.width=8, warning=FALSE, message=FALSE}
+
+numeric_cols <- df_clean %>% select(where(is.numeric))
+cor_matrix <- cor(numeric_cols, use = "complete.obs", method = "pearson")
+corrplot(cor_matrix, method = "color",
+         type = "upper",
+         tl.cex = 0.7,
+         tl.col = "black",
+         addCoef.col = "black",
+         number.cex = 0.6,
+         title = "Macierz korelacji zmiennych numerycznych",
+         mar = c(0,0,1,0))
+
+```
+### Obserwacje macierzy korelacji
+
+> - Korelacja atrybutów c_at_percent i o_at_percent wynosi -0.84. Wzrost zawartości węgla wiąże się ze spadkiem zawartości tlenu i odwrotnie.
+> - Korelacja atrybutów charge_transfer_resistance_rct_ohm i equivalent_series_resistance_rs_ohm wynosi 0.62, co oznacza, że wzrost oporu przeniesienia ładunku (Rct) wiąże się ze wzrostem oporu szeregowego (Rs).
+> - Korelacja atrybutów potential_window_v i capacitance_f_g wynosi -0.34. Można ją zinterpretować w ten sposób: szerszy zakres potencjału może nieco obniżać pojemność elektrody.
+
+
+# Interaktywne wykresy
+## Wykres zależność powierzchni właściwej i pojemności
+
+```{r interactive-trends, warning=FALSE, message=FALSE, fig.height=4, fig.width=6}
+
+
+
+p <- plot_ly(df_clean, 
+             x = ~specific_surface_area_m_2_g, 
+             y = ~capacitance_f_g,
+             type = 'scatter',
+             mode = 'markers',
+             color = ~ratio_of_id_ig,
+             colors = colorRamp(c("blue", "red")),
+             size = ~pore_volume_cm_3_g,
+             sizes = c(5, 30),
+             text = ~paste("Ref.:", ref,
+                           "<br>Electrolyte:", electrolyte_chemical_formula,
+                           "<br>Current density:", current_density_a_g,
+                           "<br>Pore size (nm):", pore_size_nm),
+             hoverinfo = "text") %>%
+  layout(title = "Wykres 1: zależność powierzchni właściwej i pojemności",
+         xaxis = list(title = "Powierzchnia właściwa (m²/g)"),
+         yaxis = list(title = "Pojemność (F/g)"),
+         legend = list(title = list(text = "Ratio ID/IG")))
+
+p
+```
+### Obserwacje do wykresu
+
+> - Na wykresie dla bardzo małej powierzchni Widzimy bardzo dużą rozpiętość pojemności. Dla większej powierzchni (>4 m²/g) pojemność utrzymuje się na niskim poziomie. To może sugerować, że nadmierna powierzchnia elektrody nie sprzyja zwiększeniu pojemności. 
+
+## Wykres zależności okna potencjału i pojemności
+```{r interactive-trends2, warning=FALSE, message=FALSE, fig.height=4, fig.width=6}
+p2 <- plot_ly(df_clean,
+              x = ~potential_window_v,
+              y = ~capacitance_f_g,
+              type = 'scatter',
+              mode = 'markers',
+              color = ~ratio_of_id_ig,
+              colors = colorRamp(c("green", "red")),
+              size = ~pore_size_nm,
+              sizes = c(5, 30),
+              text = ~paste("Ref.:", ref,
+                            "<br>Electrolyte:", electrolyte_chemical_formula,
+                            "<br>Surface area:", specific_surface_area_m_2_g,
+                            "<br>Current density:", current_density_a_g),
+              hoverinfo = "text") %>%
+  layout(title = "Wykres 2: zależność okna potencjału i pojemności",
+         xaxis = list(title = "Okno potencjału (V)"),
+         yaxis = list(title = "Pojemność (F/g)"),
+         legend = list(title = list(text = "Ratio ID/IG")))
+
+p2
+```
+### Obserwacje do wykresu
+
+> - Na wykresie widać tendencję spadkową: im większe okno potencjału, tym maksymalna pojemność elektrody spada.
+
+## Wykres 3D pojemność, okno potencjału i rozmiar porów.
+
+```{r interactive-trends3, warning=FALSE, message=FALSE, fig.height=4, fig.width=6}
+
+p3 <- plot_ly(df_clean,
+              x = ~potential_window_v,
+              y = ~capacitance_f_g,
+              z = ~pore_size_nm,
+              type = 'scatter3d',
+              mode = 'markers',
+              color = ~ratio_of_id_ig,
+              colors = colorRamp(c("blue", "red")),
+              size = ~specific_surface_area_m_2_g,
+              sizes = c(5, 30),
+              text = ~paste("Ref.:", ref,
+                            "<br>Electrolyte:", electrolyte_chemical_formula,
+                            "<br>Current density:", current_density_a_g),
+              hoverinfo = "text") %>%
+  layout(title = "Wykres 3: pojemność, okno potencjału i rozmiar porów",
+         scene = list(
+           xaxis = list(title = "Okno potencjału (V)"),
+           yaxis = list(title = "Pojemność (F/g)"),
+           zaxis = list(title = "Rozmiar porów (nm)")
+         ),
+         legend = list(title = list(text = "Ratio ID/IG")))
+
+p3
+
+
+```
+
+
+
+# Predykcja modelu i XAI
+Poniżej przedstawione jest trenowanie modelu Random Forest, który przewiduje pojemność elektrody na podstawie pozostałych zmiennych numerycznych materiału. Jednocześnie używa DALEX do określenia, które cechy mają największy wpływ na przewidywaną pojemność.
+
+```{r prediction-xai, warning=FALSE, message=FALSE}
+
+library(randomForest)
+library(DALEX)
+
+num_df <- df_clean %>% select(where(is.numeric))
+y <- num_df$capacitance_f_g
+X <- num_df %>% select(-capacitance_f_g)
+
+set.seed(123)
+rf_model <- randomForest(X, y, ntree = 500)
+
+explainer_rf <- DALEX::explain(rf_model,
+                               data = X,
+                               y = y,
+                               label = "RandomForest_Capacitance")
+
+vip <- DALEX::model_parts(explainer_rf)
+plot(vip) + ggtitle("Wpływ zmiennych na predykcję pojemności (Random Forest)")
+
+pred <- predict(rf_model, X[1:5,])
+pred
+
+```
+## Obserwacje
+> - Analiza XAI pokazała, że zmienna potential_window_v ma największy wpływ na przewidywaną pojemność materiałów do superkondensatorów. Oznacza to, że szerokość okna potencjału elektrody jest kluczowym parametrem determinującym pojemność.
+
+
+```{r save-html, eval=FALSE}
+
+```
+
+---
+
+
+<!-- koniec szablonu -->
